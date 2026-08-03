@@ -105,7 +105,7 @@ func newSeederOfSize(dir string, size int, pieceLen int64) ([]byte, int) {
 	cc.DisablePEX = true
 	cc.NoDefaultPortForwarding = true
 	cc.ListenPort = 0
-	cc.Logger = analog.Default.WithFilterLevel(analog.Error)
+	cc.Logger = analog.Default.WithFilterLevel(analog.Error) //nolint:staticcheck // Slogger migration is separate; tests tap analog.Default.
 	seeder, err := antorrent.NewClient(cc)
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(func() { Expect(seeder.Close()).To(BeEmpty()) })

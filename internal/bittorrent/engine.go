@@ -109,7 +109,7 @@ func New(ctx context.Context, store db.Store) (*Engine, error) {
 	cc.DefaultStorage = st
 	cc.Seed = true
 	cc.NoDHT = entry.DisableDHT
-	cc.Logger = analog.Default.WithFilterLevel(analog.Error)
+	cc.Logger = analog.Default.WithFilterLevel(analog.Error) //nolint:staticcheck // Slogger migration is separate; tests tap analog.Default.
 	// anacrolix v1.61 can lose a peer's request-update wakeup: the msg writer
 	// subscribes to its wake condition only after checking state
 	// (peer-conn-msg-writer.go run), and once that tickle is lost the
