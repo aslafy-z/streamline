@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"sort"
@@ -50,6 +52,12 @@ var (
 	// caller treats this as a soft skip — no grab_failures increment, no
 	// new DownloadRecord — since state has drifted, not a real failure.
 	ErrTorrentAlreadyExists = errors.New("torrent already exists in download client")
+	// errIndexerFetch replaces the status code and the body-emptiness the
+	// fetch used to render into the error. Both reached the caller verbatim
+	// through the 500 body, which turned a redirect into a read oracle over
+	// whatever the final hop was. The detail is logged instead, and the
+	// otelhttp client span already carries the status.
+	errIndexerFetch = errors.New("indexer returned an unusable response")
 )
 
 var (
@@ -885,6 +893,102 @@ func fromConfiguredIndexer(u *url.URL) bool {
 	return false
 }
 
+// torrentFetchClient reuses otelx.HTTPClient's instrumented transport and
+// timeout but re-validates every redirect hop. checkReleaseSource only ever
+// sees the first URL; the shared client follows up to 10 redirects to any
+// host, so a configured indexer could 302 a member-controlled fetch into
+// loopback, RFC1918 or the cloud metadata service.
+//
+// The transport is aliased at package init. otelx builds it once at init too,
+// so the alias cannot go stale, but a future lazily-rebuilt transport there
+// would leave this copy pointing at the old one.
+var torrentFetchClient = &http.Client{
+	Transport:     otelx.HTTPClient.Transport,
+	Timeout:       otelx.HTTPClient.Timeout,
+	CheckRedirect: checkTorrentRedirect,
+}
+
+// maxTorrentRedirects bounds the chain well below net/http's own 10-hop cap,
+// which stays as the backstop.
+const maxTorrentRedirects = 5
+
+// cgnatPrefix is RFC 6598 shared address space: routable inside a carrier or
+// a homelab NAT, never on the public internet.
+var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
+
+// lookupNetIP is a variable so specs can present public and private answers
+// without depending on real DNS.
+var lookupNetIP = func(ctx context.Context, host string) ([]netip.Addr, error) {
+	return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+}
+
+func checkTorrentRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxTorrentRedirects {
+		return fmt.Errorf("%w: too many redirects", ErrUntrustedSource)
+	}
+	return redirectHopAllowed(req.Context(), req.URL)
+}
+
+// redirectHopAllowed decides whether the fetch may follow a hop. Prowlarr and
+// Jackett download links legitimately redirect to public tracker hosts, so
+// re-applying fromConfiguredIndexer alone would break real grabs: a hop is
+// allowed when it addresses a configured indexer (operator-trusted, and
+// normally on a private address) or when every address its host resolves to
+// is publicly routable. Failing that, the request is never issued, so the
+// target learns nothing and neither does the caller.
+//
+// Errors carry neither the target URL nor the resolved addresses: they reach
+// the caller through the 422 body, and echoing either would hand back the very
+// information the guard exists to withhold.
+//
+// Residual, deliberately not closed here: the addresses checked are not the
+// ones the transport later dials, so a DNS answer that flips between the two
+// still reaches an internal host. Closing it needs a dial-time Control hook
+// rejecting the connected address, which cannot also allow the configured
+// private indexers this guard exists to permit.
+func redirectHopAllowed(ctx context.Context, u *url.URL) error {
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%w: unsupported redirect scheme", ErrUntrustedSource)
+	}
+	if fromConfiguredIndexer(u) {
+		return nil
+	}
+	addrs, err := lookupNetIP(ctx, u.Hostname())
+	if err != nil || len(addrs) == 0 {
+		return fmt.Errorf(
+			"%w: redirect target is not publicly routable", ErrUntrustedSource,
+		)
+	}
+	for _, a := range addrs {
+		if !isPublicAddr(a) {
+			return fmt.Errorf(
+				"%w: redirect target is not publicly routable",
+				ErrUntrustedSource,
+			)
+		}
+	}
+	return nil
+}
+
+// isPublicAddr reports whether a is reachable only from the public internet's
+// address space, so a redirect there cannot pivot into the deployment's own
+// network or a cloud metadata endpoint.
+func isPublicAddr(a netip.Addr) bool {
+	a = a.Unmap()
+	switch {
+	case !a.IsValid(),
+		a.IsLoopback(),
+		a.IsPrivate(),
+		a.IsLinkLocalUnicast(),
+		a.IsLinkLocalMulticast(),
+		a.IsMulticast(),
+		a.IsUnspecified(),
+		cgnatPrefix.Contains(a):
+		return false
+	}
+	return true
+}
+
 // resolveTorrentSource turns an indexer download link into the payload
 // Client.AddTorrent expects. magnet: links pass through; http(s) URLs are
 // fetched in-process so download clients that can't reach the indexer
@@ -908,17 +1012,26 @@ func resolveTorrentSource(ctx context.Context, dl string) (TorrentSource, error)
 	if err != nil {
 		return TorrentSource{}, otelx.RedactTransportError(err)
 	}
-	resp, err := otelx.HTTPClient.Do(req)
+	resp, err := torrentFetchClient.Do(req)
 	if err != nil {
+		// net/http builds the *url.Error around a rejected hop from that
+		// hop's own URL, so passing it on would hand the caller the very
+		// address the guard refused to contact. Only the sentinel travels.
+		if errors.Is(err, ErrUntrustedSource) {
+			slog.WarnContext(ctx, "torrent fetch redirect rejected",
+				"url", otelx.RedactURL(req.URL),
+				"error", otelx.RedactTransportError(err))
+			return TorrentSource{}, ErrUntrustedSource
+		}
 		return TorrentSource{}, fmt.Errorf(
 			"%w: %w", ErrUnreachable, otelx.RedactTransportError(err),
 		)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return TorrentSource{}, fmt.Errorf(
-			"indexer returned status %d", resp.StatusCode,
-		)
+		slog.WarnContext(ctx, "torrent fetch failed",
+			"url", otelx.RedactURL(req.URL), "status", resp.StatusCode)
+		return TorrentSource{}, errIndexerFetch
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTorrentFileSize+1))
 	if err != nil {
@@ -930,7 +1043,9 @@ func resolveTorrentSource(ctx context.Context, dl string) (TorrentSource, error)
 		)
 	}
 	if len(body) == 0 {
-		return TorrentSource{}, fmt.Errorf("indexer returned empty body")
+		slog.WarnContext(ctx, "torrent fetch failed",
+			"url", otelx.RedactURL(req.URL), "reason", "empty body")
+		return TorrentSource{}, errIndexerFetch
 	}
 	return TorrentSource{Bytes: body}, nil
 }

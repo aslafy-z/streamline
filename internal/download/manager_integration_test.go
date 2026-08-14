@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -151,6 +152,49 @@ var _ = Describe("Manager.Grab", Label("integration", "downloads"), func() {
 		refreshed, err := dbClient.Movie.Get(ctx, m.ID)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(refreshed.Status).To(Equal(movie.StatusDownloading))
+	})
+
+	// rss.processMovie and the missing-media sweep both reach the fetch
+	// through this same Grab, so the scheduled paths need no guard of their
+	// own.
+	It("refuses a release whose indexer redirects off the configured set", func() {
+		var reached atomic.Int64
+		hidden := httptest.NewServer(http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				reached.Add(1)
+				w.WriteHeader(http.StatusTeapot)
+			},
+		))
+		DeferCleanup(hidden.Close)
+
+		indexerSrv := httptest.NewServer(http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, hidden.URL+"/secret", http.StatusFound)
+			},
+		))
+		DeferCleanup(indexerSrv.Close)
+
+		qbitHost, qbitPort := splitHostPort(ts.URL)
+		ixHost, ixPort := splitHostPort(indexerSrv.URL)
+		configtest.Setup(map[string]any{
+			"download_clients": []map[string]any{{
+				"name": "qbit-test", "client_type": "qbittorrent",
+				"host": qbitHost, "port": int(qbitPort),
+				"auth_method": "password", "username": "admin",
+				"password": "admin", "priority": 10, "enabled": true,
+			}},
+			"indexers": []map[string]any{{
+				"name": "stub", "host": ixHost, "port": int(ixPort),
+				"api_key": "k", "protocol": "torznab", "enabled": true,
+			}},
+		})
+
+		_, err := mgr.Grab(ctx, indexer.SearchResult{
+			Title:    "Fight.Club.1999.1080p.BluRay.x264-GROUP",
+			Download: indexerSrv.URL + "/dl?apikey=k",
+		}, m.ID)
+		Expect(err).To(MatchError(ErrUntrustedSource))
+		Expect(reached.Load()).To(BeZero())
 	})
 })
 

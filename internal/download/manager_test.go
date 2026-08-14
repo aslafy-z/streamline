@@ -3,10 +3,13 @@ package download
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -483,3 +486,214 @@ var _ = Describe("buildClient builtin", Label("unit", "downloads"), func() {
 		Expect(err.Error()).To(ContainSubstring("restart"))
 	})
 })
+
+var _ = Describe(
+	"torrent fetch redirect guard",
+	Label("unit", "downloads"),
+	func() {
+		var (
+			ctx        context.Context
+			indexerSrv *httptest.Server
+			internal   *httptest.Server
+			internalHi atomic.Int64
+		)
+
+		BeforeEach(func() {
+			ctx = context.Background()
+			internalHi.Store(0)
+
+			// Stands in for an internal endpoint the operator never
+			// configured: loopback, so the public-address rule denies it.
+			internal = httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, _ *http.Request) {
+					internalHi.Add(1)
+					w.WriteHeader(http.StatusTeapot)
+				},
+			))
+			DeferCleanup(internal.Close)
+			internalHost, internalPort := splitHostPort(internal.URL)
+
+			mux := http.NewServeMux()
+			mux.HandleFunc(
+				"/to-internal",
+				func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(
+						w, r, internal.URL+"/secret", http.StatusFound,
+					)
+				},
+			)
+			mux.HandleFunc(
+				"/to-other-port",
+				func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, fmt.Sprintf(
+						"http://%s:%d/secret", internalHost, internalPort,
+					), http.StatusFound)
+				},
+			)
+			mux.HandleFunc(
+				"/to-file",
+				func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(
+						w, r, "file:///etc/passwd", http.StatusFound,
+					)
+				},
+			)
+			mux.HandleFunc("/loop", func(w http.ResponseWriter, r *http.Request) {
+				internalHi.Add(1)
+				http.Redirect(w, r, "/loop", http.StatusFound)
+			})
+			mux.HandleFunc("/chain", func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/final", http.StatusFound)
+			})
+			mux.HandleFunc(
+				"/final",
+				func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = w.Write([]byte("d8:announce4:teste"))
+				},
+			)
+			mux.HandleFunc(
+				"/unavailable",
+				func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusServiceUnavailable)
+				},
+			)
+			mux.HandleFunc(
+				"/empty",
+				func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				},
+			)
+			indexerSrv = httptest.NewServer(mux)
+			DeferCleanup(indexerSrv.Close)
+
+			host, port := splitHostPort(indexerSrv.URL)
+			configtest.Setup(map[string]any{
+				"indexers": []map[string]any{{
+					"name": "stub", "host": host, "port": int(port),
+					"api_key": "k", "protocol": "torznab", "enabled": true,
+				}},
+			})
+		})
+
+		It(
+			"rejects a redirect to an internal listener without contacting it",
+			func() {
+				_, err := resolveTorrentSource(ctx, indexerSrv.URL+"/to-internal")
+				Expect(err).To(MatchError(ErrUntrustedSource))
+				Expect(internalHi.Load()).To(BeZero())
+			},
+		)
+
+		It("discloses neither the redirect target's status nor its address", func() {
+			_, internalPort := splitHostPort(internal.URL)
+			_, err := resolveTorrentSource(ctx, indexerSrv.URL+"/to-internal")
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).NotTo(ContainSubstring("418"))
+			Expect(err.Error()).NotTo(
+				ContainSubstring(strconv.Itoa(int(internalPort))),
+			)
+		})
+
+		It("rejects a redirect to another port on the configured host", func() {
+			_, err := resolveTorrentSource(ctx, indexerSrv.URL+"/to-other-port")
+			Expect(err).To(MatchError(ErrUntrustedSource))
+			Expect(internalHi.Load()).To(BeZero())
+		})
+
+		It("rejects a redirect to a non-http scheme", func() {
+			src, err := resolveTorrentSource(ctx, indexerSrv.URL+"/to-file")
+			Expect(err).To(HaveOccurred())
+			Expect(src.Bytes).To(BeEmpty())
+		})
+
+		It("terminates a redirect loop on the configured host", func() {
+			_, err := resolveTorrentSource(ctx, indexerSrv.URL+"/loop")
+			Expect(err).To(MatchError(ErrUntrustedSource))
+			Expect(internalHi.Load()).To(BeEquivalentTo(maxTorrentRedirects))
+		})
+
+		It("follows a chain of hops that stay on the configured indexer", func() {
+			src, err := resolveTorrentSource(ctx, indexerSrv.URL+"/chain")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(src.Bytes).NotTo(BeEmpty())
+		})
+
+		It("returns a generic error for a non-200 response", func() {
+			_, err := resolveTorrentSource(ctx, indexerSrv.URL+"/unavailable")
+			Expect(err).To(MatchError(errIndexerFetch))
+			Expect(err.Error()).NotTo(ContainSubstring("503"))
+		})
+
+		It("returns the same generic error for an empty body", func() {
+			_, err := resolveTorrentSource(ctx, indexerSrv.URL+"/empty")
+			Expect(err).To(MatchError(errIndexerFetch))
+			Expect(err.Error()).NotTo(ContainSubstring("empty"))
+		})
+
+		Describe("redirectHopAllowed", func() {
+			const target = "https://tracker.public.example/file.torrent"
+
+			stubResolver := func(addrs []netip.Addr, err error) {
+				GinkgoHelper()
+				original := lookupNetIP
+				lookupNetIP = func(context.Context, string) ([]netip.Addr, error) {
+					return addrs, err
+				}
+				DeferCleanup(func() { lookupNetIP = original })
+			}
+
+			It("allows a host that resolves entirely to public addresses", func() {
+				stubResolver([]netip.Addr{netip.MustParseAddr("1.2.3.4")}, nil)
+				u, err := url.Parse(target)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(redirectHopAllowed(ctx, u)).To(Succeed())
+			})
+
+			It("rejects a host with any private address among the answers", func() {
+				stubResolver([]netip.Addr{
+					netip.MustParseAddr("1.2.3.4"),
+					netip.MustParseAddr("10.0.0.5"),
+				}, nil)
+				u, err := url.Parse(target)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(redirectHopAllowed(ctx, u)).
+					To(MatchError(ErrUntrustedSource))
+			})
+
+			It("rejects a host that fails to resolve", func() {
+				stubResolver(nil, errors.New("nxdomain"))
+				u, err := url.Parse(target)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(redirectHopAllowed(ctx, u)).
+					To(MatchError(ErrUntrustedSource))
+			})
+
+			It("rejects a host that resolves to nothing", func() {
+				stubResolver(nil, nil)
+				u, err := url.Parse(target)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(redirectHopAllowed(ctx, u)).
+					To(MatchError(ErrUntrustedSource))
+			})
+		})
+
+		DescribeTable("isPublicAddr",
+			func(addr string, public bool) {
+				Expect(isPublicAddr(netip.MustParseAddr(addr))).To(Equal(public))
+			},
+			Entry("loopback v4", "127.0.0.1", false),
+			Entry("RFC1918 /8", "10.0.0.1", false),
+			Entry("RFC1918 /12", "172.16.0.1", false),
+			Entry("RFC1918 /16", "192.168.1.1", false),
+			Entry("cloud metadata", "169.254.169.254", false),
+			Entry("CGNAT", "100.64.0.1", false),
+			Entry("loopback v6", "::1", false),
+			Entry("link-local v6", "fe80::1", false),
+			Entry("unspecified v6", "::", false),
+			Entry("unspecified v4", "0.0.0.0", false),
+			Entry("v4-mapped private", "::ffff:10.0.0.1", false),
+			Entry("public v4", "93.184.216.34", true),
+			Entry("public v6", "2606:4700::1111", true),
+		)
+	},
+)
