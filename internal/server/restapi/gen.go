@@ -4044,7 +4044,7 @@ type ServerInterface interface {
 	// Revoke a session owned by current user
 	// (DELETE /auth/me/sessions/{id})
 	DeleteMySession(w http.ResponseWriter, r *http.Request, id ResourceID)
-	// Change current user's password; revokes all other sessions
+	// Change current user's password; revokes all other sessions and all API keys
 	// (POST /auth/password)
 	ChangePassword(w http.ResponseWriter, r *http.Request)
 	// Upcoming wanted-movie digital releases in [from, to).
@@ -4539,7 +4539,7 @@ func (_ Unimplemented) DeleteMySession(w http.ResponseWriter, r *http.Request, i
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// Change current user's password; revokes all other sessions
+// Change current user's password; revokes all other sessions and all API keys
 // (POST /auth/password)
 func (_ Unimplemented) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)
@@ -15884,7 +15884,7 @@ type StrictServerInterface interface {
 	// Revoke a session owned by current user
 	// (DELETE /auth/me/sessions/{id})
 	DeleteMySession(ctx context.Context, request DeleteMySessionRequestObject) (DeleteMySessionResponseObject, error)
-	// Change current user's password; revokes all other sessions
+	// Change current user's password; revokes all other sessions and all API keys
 	// (POST /auth/password)
 	ChangePassword(ctx context.Context, request ChangePasswordRequestObject) (ChangePasswordResponseObject, error)
 	// Upcoming wanted-movie digital releases in [from, to).
