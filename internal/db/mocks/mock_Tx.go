@@ -24,6 +24,8 @@ import (
 
 	request "github.com/datahearth/streamline/ent/request"
 
+	role "github.com/datahearth/streamline/internal/role"
+
 	time "time"
 
 	tvshow "github.com/datahearth/streamline/ent/tvshow"
@@ -1216,9 +1218,9 @@ func (_c *MockTx_CountUsers_Call) RunAndReturn(run func(context.Context) (int, e
 	return _c
 }
 
-// CountUsersByRole provides a mock function with given fields: ctx, role
-func (_m *MockTx) CountUsersByRole(ctx context.Context, role user.Role) (int, error) {
-	ret := _m.Called(ctx, role)
+// CountUsersByRole provides a mock function with given fields: ctx, _a1
+func (_m *MockTx) CountUsersByRole(ctx context.Context, _a1 user.Role) (int, error) {
+	ret := _m.Called(ctx, _a1)
 
 	if len(ret) == 0 {
 		panic("no return value specified for CountUsersByRole")
@@ -1227,16 +1229,16 @@ func (_m *MockTx) CountUsersByRole(ctx context.Context, role user.Role) (int, er
 	var r0 int
 	var r1 error
 	if rf, ok := ret.Get(0).(func(context.Context, user.Role) (int, error)); ok {
-		return rf(ctx, role)
+		return rf(ctx, _a1)
 	}
 	if rf, ok := ret.Get(0).(func(context.Context, user.Role) int); ok {
-		r0 = rf(ctx, role)
+		r0 = rf(ctx, _a1)
 	} else {
 		r0 = ret.Get(0).(int)
 	}
 
 	if rf, ok := ret.Get(1).(func(context.Context, user.Role) error); ok {
-		r1 = rf(ctx, role)
+		r1 = rf(ctx, _a1)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -1251,12 +1253,12 @@ type MockTx_CountUsersByRole_Call struct {
 
 // CountUsersByRole is a helper method to define mock.On call
 //   - ctx context.Context
-//   - role user.Role
-func (_e *MockTx_Expecter) CountUsersByRole(ctx interface{}, role interface{}) *MockTx_CountUsersByRole_Call {
-	return &MockTx_CountUsersByRole_Call{Call: _e.mock.On("CountUsersByRole", ctx, role)}
+//   - _a1 user.Role
+func (_e *MockTx_Expecter) CountUsersByRole(ctx interface{}, _a1 interface{}) *MockTx_CountUsersByRole_Call {
+	return &MockTx_CountUsersByRole_Call{Call: _e.mock.On("CountUsersByRole", ctx, _a1)}
 }
 
-func (_c *MockTx_CountUsersByRole_Call) Run(run func(ctx context.Context, role user.Role)) *MockTx_CountUsersByRole_Call {
+func (_c *MockTx_CountUsersByRole_Call) Run(run func(ctx context.Context, _a1 user.Role)) *MockTx_CountUsersByRole_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		run(args[0].(context.Context), args[1].(user.Role))
 	})
@@ -9234,6 +9236,66 @@ func (_c *MockTx_UpdateUserPassword_Call) Return(_a0 error) *MockTx_UpdateUserPa
 }
 
 func (_c *MockTx_UpdateUserPassword_Call) RunAndReturn(run func(context.Context, uint32, string) error) *MockTx_UpdateUserPassword_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateUserRole provides a mock function with given fields: ctx, id, r
+func (_m *MockTx) UpdateUserRole(ctx context.Context, id uint32, r role.Value) (*ent.User, error) {
+	ret := _m.Called(ctx, id, r)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateUserRole")
+	}
+
+	var r0 *ent.User
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, uint32, role.Value) (*ent.User, error)); ok {
+		return rf(ctx, id, r)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, uint32, role.Value) *ent.User); ok {
+		r0 = rf(ctx, id, r)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*ent.User)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, uint32, role.Value) error); ok {
+		r1 = rf(ctx, id, r)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockTx_UpdateUserRole_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateUserRole'
+type MockTx_UpdateUserRole_Call struct {
+	*mock.Call
+}
+
+// UpdateUserRole is a helper method to define mock.On call
+//   - ctx context.Context
+//   - id uint32
+//   - r role.Value
+func (_e *MockTx_Expecter) UpdateUserRole(ctx interface{}, id interface{}, r interface{}) *MockTx_UpdateUserRole_Call {
+	return &MockTx_UpdateUserRole_Call{Call: _e.mock.On("UpdateUserRole", ctx, id, r)}
+}
+
+func (_c *MockTx_UpdateUserRole_Call) Run(run func(ctx context.Context, id uint32, r role.Value)) *MockTx_UpdateUserRole_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(uint32), args[2].(role.Value))
+	})
+	return _c
+}
+
+func (_c *MockTx_UpdateUserRole_Call) Return(_a0 *ent.User, _a1 error) *MockTx_UpdateUserRole_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *MockTx_UpdateUserRole_Call) RunAndReturn(run func(context.Context, uint32, role.Value) (*ent.User, error)) *MockTx_UpdateUserRole_Call {
 	_c.Call.Return(run)
 	return _c
 }
