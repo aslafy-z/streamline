@@ -1,3 +1,3 @@
 # Screenshots for DataHearth/streamline#191
 
-Overview "Read more" toggle, before/after, at 1440, 820 and 390 px. Seeded fictional series and movie, Radiohead added from MusicBrainz.
+Overview "Read more" toggle, before/after, at 1440, 820 and 390 px. Seeded fictional series and movie, Radiohead added from MusicBrainz (its overview was written into the scratch database for the second round, after Wikipedia returned none).
